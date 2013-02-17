@@ -22,11 +22,34 @@ int carve( cv::Mat& src, vector<int>& paths, int cur_itr, cv::Mat& path_pix ){
 	const int height = src.rows;
 
 	uchar* path_pix_data = path_pix.ptr(cur_itr);
+	int channel = src.channels();
 
 	for( int i=0; i<height; i++ ){
 		uchar* src_data = src.ptr(i);
 		int cur_path = paths[cur_itr*height+i];
-		memmove( src_data+3*cur_path, src_data+3*cur_path+3, 3*(width-cur_path));
+		memmove( src_data+channel*cur_path, src_data+channel*cur_path+channel, channel*(width-cur_path));
+		/*
+		if( src_data[3*cur_path] != path_pix_data[3*i] ){
+		cout<< "failed" <<endl;
+		}
+		*/
+	}
+	cout<< "width,height:" << width << "," << height <<endl;
+	src = cv::Mat(src, cv::Rect(0,0, width-1, height));
+
+	return cur_itr+1;
+}
+
+int carve( cv::Mat& src, vector<int>& paths, int cur_itr){
+	const int width = src.cols;
+	const int height = src.rows;
+
+	int channel = src.channels();
+
+	for( int i=0; i<height; i++ ){
+		uchar* src_data = src.ptr(i);
+		int cur_path = paths[cur_itr*height+i];
+		memmove( src_data+channel*cur_path, src_data+channel*cur_path+channel, channel*(width-cur_path));
 		/*
 		if( src_data[3*cur_path] != path_pix_data[3*i] ){
 		cout<< "failed" <<endl;
@@ -177,6 +200,116 @@ void genCarvingData( const cv::Mat& src, int itr_num, std::vector<int>& paths, c
 	}
 }
 
+//入力に必要なもの：画像、削るピクセル数
+//出力すべきもの：パス、パスに対応するピクセル値
+void genCarvingDataWithWeights( const cv::Mat& src, const cv::Mat& weights, int itr_num, std::vector<int>& paths, cv::Mat& path_pix )
+{
+	const int src_width = src.cols;
+	const int src_height = src.rows;
+
+	paths.clear();
+	paths.resize(itr_num*src_height);
+	path_pix.create( itr_num, src_height, CV_8UC3);//値の連続性を考えてcolsにheightを設定
+	//cv::Mat path_pix( itr_num, src_height, CV_8UC3);//値の連続性を考えてcolsにheightを設定
+
+	cv::Mat orig_image = src.clone();
+	cv::Mat carve_weights = weights.clone();
+	cv::Mat gray,edge;
+
+	for( int n=0; n<itr_num; n++){
+		cout<< "current iteration times is " << n <<endl;
+
+		cv::cvtColor(orig_image, gray, CV_BGR2GRAY );
+		cv::Laplacian(gray, edge, 0);
+		//cv::Sobel(gray,edge,CV_8UC1,1,0,-1);
+
+		cv::imshow("edge",edge);
+		cv::waitKey(5);
+
+		const int width = orig_image.cols;
+		const int height = orig_image.rows;
+		vector<int> table(height*width, 0);
+		vector<int> path(height*width, 0);
+
+		uchar* edge_data = edge.ptr(0);
+		const uchar* weights_data = carve_weights.ptr(0);
+		for( int i=0; i<width; i++ )
+			table[i] = edge_data[i] + weights_data[i];
+
+		cv::Mat path_image(height, width,CV_8UC3);
+
+		for( int i=1; i<height; i++){
+			uchar* edge_data0 = edge.ptr(i-1);
+			uchar* edge_data1 = edge.ptr(i);
+			const uchar* weights_data = carve_weights.ptr(i);
+
+			uchar* path_data = path_image.ptr(i);
+
+			for( int h=0; h<width; h++ ){
+				int id = -1;
+				int min = INT_MAX;
+
+				const int dir[3] = {-1,1,0};
+				for( int g=0; g<3; g++){
+					int x = h + dir[g];
+
+					if(x< 0 || width <= x) continue;
+					if( edge_data0[x] <= min ){
+						min = edge_data0[x];
+						id = dir[g];
+					}
+				}
+				const uchar r_pix[3] = {0,0,255};
+				const uchar g_pix[3] = {0,255,0};
+				const uchar b_pix[3] = {255,0,0};
+				if( id == -1 ) memcpy(path_data+3*h, r_pix, 3);
+				if( id == 0 ) memcpy(path_data+3*h, g_pix, 3);
+				if( id == 1 ) memcpy(path_data+3*h, b_pix, 3);
+
+				path[width*i+h] = id;
+				int val = table[width*(i-1)+(h+id)] + edge_data1[h] + weights_data[h];
+				table[width*i+h] = val;
+			}
+
+		}
+		cv::imshow( "path", path_image);
+		cv::waitKey(5);
+
+		int x_id = 0;
+		int min_val = INT_MAX;
+		for( int x=0; x<width; x++ ){
+			int cur_val = table[(height-1)*width+x];
+			if( min_val > cur_val ){
+				min_val = cur_val;
+				x_id = x;
+			}
+		}
+
+		paths[(n*height)+height-1] = x_id;
+		uchar *path_pix_data = path_pix.ptr(n);
+		memcpy( path_pix_data+3*(height-1), orig_image.ptr(height-1)+3*x_id, 3);
+		//cout<< "[" << x_id << "," << height-1 << "]" <<flush;
+		for( int i=height-2; i>=0; i--){
+			x_id = x_id + path[i*width+x_id];
+			paths[(n*height)+i] = x_id;
+			memcpy( path_pix_data+3*(i), orig_image.ptr(i)+3*x_id, 3);
+			//cout<< "[" << x_id << "," << i-1 << "]" <<flush;
+		}
+
+		/*
+		drawCarvePath( orig_image, paths, n );
+		cv::imshow( "DEBUG:Carve path", orig_image );
+		*/
+		carve( orig_image, paths, n, path_pix);
+		carve( carve_weights, paths, n );
+		/*
+		cv::imshow("pathpix", path_pix);
+		cv::imshow( "DEBUG:Carving", orig_image );
+		cv::waitKey(10);
+		*/
+	}
+}
+
 void drawCarvePath( cv::Mat& src, vector<int>& paths, int cur_itr )
 {	
 	const int width = src.cols;
@@ -308,6 +441,7 @@ void sortCarveMap( const cv::Mat&map, int itr_num, cv::Mat& sorted_map )
 	for( int i=0; i<itr_num; i++ ){
 		pos.push_back(IndexVal(i));
 	}
+	//CarveするピクセルのX座標の和を計算
 	for( int i=0; i<height; i++ ){
 		const int* map_data = (int*)map.ptr(i);
 		for( int h=0; h<width; h++){
@@ -357,16 +491,22 @@ void mergeMapLevel( const cv::Mat& map, int itr_num, int level, cv::Mat& merged 
 {
 	assert( map.type() == CV_32SC1 );
 
+	if( itr_num < level ){
+		merged = map.clone();
+	}
+
 	const int width = map.cols;
 	const int height = map.rows;
 
 	merged.create(map.size(), CV_32SC1);
 
-	int unit = ((double)itr_num / level)+0.5;
+	double unit = ((double)itr_num / level);
 	vector<int> transition;
 	transition.resize(itr_num);
 	for( int i=0; i<itr_num; i++ ){
-		transition[i] = i/unit;
+		int val =  i/unit;
+		assert( val <= level );
+		transition[i] = val;
 	}
 
 	for( int i=0; i<height; i++ ){
@@ -385,23 +525,125 @@ void mergeMapLevel( const cv::Mat& map, int itr_num, int level, cv::Mat& merged 
 	}
 }
 
+void smoothCarveMap( const cv::Mat& map, int itr_num, int interval, cv::Mat& smoothed_map )
+{
+	const int width = map.cols;
+	const int height = map.rows;
 
+	assert( map.type() == CV_32SC1 );
+
+	
+	vector<IndexVal> pos;//Craveするタイミング
+	for( int i=0; i<itr_num; i++ ){
+		pos.push_back(IndexVal(i));
+	}
+	//CarveするピクセルのX座標の和を計算
+	for( int i=0; i<height; i++ ){
+		const int* map_data = (int*)map.ptr(i);
+		for( int h=0; h<width; h++){
+			const int* pix = map_data + h;
+
+			if( pix[0] == INT_MAX ) continue;
+
+			pos[pix[0]].val += h;
+		}
+	}
+
+	for( int i=0; i<itr_num; i++ ){
+		pos[i].val /= height;
+	}
+
+	sort( pos.begin(), pos.end());
+	int counter = 0;
+	for( int i=0; i<itr_num; i++ ){
+		int index = counter%itr_num;
+		pos[index] = i;
+		cout<< "["<<index<<"]:" << i <<endl;
+		counter += interval;
+	}
+
+	vector<int> transition;//元インデックス→遷移先インデックス
+	transition.resize(itr_num);
+	for( int i=0; i<itr_num; i++ ){
+		transition[pos[i].index] = i;
+		cout<< pos[i].index << "->" << i <<endl;
+	}
+
+	smoothed_map = map.clone();
+	for( int i=0; i<height; i++ ){
+		const int* map_data = (int*)map.ptr(i);
+		int* sorted_data = (int*)smoothed_map.ptr(i);
+
+		for( int h=0; h<width; h++){
+			const int* map_pix = map_data + h;
+			int* sorted_pix = sorted_data + h;
+
+			if( map_pix[0] == INT_MAX ) continue;
+
+			sorted_pix[0] = transition[map_pix[0]];
+		}
+	}
+
+	cv::Mat tmp;
+	mergeMapLevel( map, itr_num, 254, tmp );
+	matInt2Char( tmp, tmp );
+	cv::imshow("original map", tmp);
+	mergeMapLevel( smoothed_map, itr_num, 254, tmp );
+	matInt2Char( smoothed_map, tmp );
+	cv::imshow("sorted map", tmp);
+	cv::waitKey();
+
+}
+
+void mergeMap2Image( const cv::Mat& src, const cv::Mat& map, cv::Mat& dst )
+{
+
+	vector<cv::Mat> ch_array;
+	cv::split( src, ch_array );
+	ch_array.push_back( map );
+	assert(ch_array.size() == 4);
+	for( int i=1; i<4; i++ ){
+		assert( ch_array[0].cols == ch_array[i].cols );
+		assert( ch_array[0].rows == ch_array[i].rows );
+		assert( ch_array[0].type() == ch_array[i].type() );
+	}
+	cv::merge(ch_array, dst );
+	assert( dst.channels() == 4 );
+}
+
+
+#define WEIGHTED_CARVE
+#define SORT
+//#define SMOOTH
 int main( int argc, char** argv ){
 	//string fname = "C:\\Users\\u-ta\\Desktop\\neko.jpg";
 	//string fname = "C:\\Users\\u-ta\\Desktop\\program_user_1_0.jpg";
 	//string fname = "C:\\Users\\u-ta\\Desktop\\tuba.jpg";
-	string fname = "C:\\Users\\u-ta\\Desktop\\DSC03239-2.jpg";
+	//string fname = "C:\\Users\\u-ta\\Desktop\\DSC03239-2.jpg";
 	//string fname = "C:\\Users\\u-ta\\Desktop\\DSC03239-2-short.jpg";
-	int itr_num = 1000;
 
+	/*
+	string fname = "C:\\Users\\u-ta\\Desktop\\wakaba4111-img424x572-1341632800n01hus69162-cp.jpg";
+	string weights_fname = "C:\\Users\\u-ta\\Desktop\\Meine水着ガール_bw-cp.png";
+	*/
+	
+	string dir_name = "C:\\Users\\u-ta\\Desktop\\HackDay201302\\rimujin";
+	string fname = dir_name + "\\source.jpg";
+	string weights_fname = dir_name + "\\weights.png";
+	
+	int itr_num = 1200;
 
 	vector<int> paths;
 	const cv::Mat src = cv::imread(fname);
 
-
 	cv::Mat path_pix;
 
+#ifndef WEIGHTED_CARVE
 	genCarvingData( src, itr_num, paths, path_pix);
+#else
+	const cv::Mat weights = cv::imread( weights_fname, 0 );
+	genCarvingDataWithWeights( src, weights, itr_num, paths, path_pix);
+#endif 
 
 	cv::imshow("path_pix", path_pix);
 	cv::waitKey();
@@ -478,7 +720,15 @@ int main( int argc, char** argv ){
 	}
 
 	cv::Mat sorted_map;
+#ifdef SORT
 	sortCarveMap( carve_map, itr_num, sorted_map);
+#else
+#ifdef SMOOTH
+	smoothCarveMap( carve_map, itr_num, 4, sorted_map );
+#else
+	aaaaaa
+#endif
+#endif
 	tmp_map = sorted_map;
 	cv::destroyAllWindows();
 
@@ -524,4 +774,8 @@ int main( int argc, char** argv ){
 
 	matInt2Char( merged_map, tmp_map );
 	cv::imwrite( "sorted_merged_map.png", tmp_map );
+
+	cv::Mat map_alpha;
+	mergeMap2Image( src, tmp_map, map_alpha );
+	cv::imwrite( "source_map.png", map_alpha );
 }
